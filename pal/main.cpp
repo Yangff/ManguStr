@@ -388,24 +388,7 @@ bool PalPatch() {
     return true;
 }
 #define hookCheck(x) {NTSTATUS s = x; if (FAILED(s)) { debugp(#x" Failed\n"); return false;} }
-bool HookCrack() {
-    hookCheck(LhInstallHook(
-        GetProcAddress(GetModuleHandle("Kernel32"), "GetVolumeInformationA"),
-        hookGetVolumeInformationA, 0, &hHookGetVolumeInformationA
-    ));
-    hookCheck(LhInstallHook(
-        GetProcAddress(GetModuleHandle("Kernel32"), "GetDriveTypeA"),
-        hookGetDriveTypeA, 0, &hHookGetDriveTypeA
-    ));
-    hookCheck(LhInstallHook(
-        GetProcAddress(GetModuleHandle("Kernel32"), "GetLogicalDrives"),
-        hookGetLogicalDrives, 0, &hHookGetLogicalDrives
-    ));
-    hookCheck(LhSetExclusiveACL(ACLEntries, 0, &hHookGetVolumeInformationA));
-    hookCheck(LhSetExclusiveACL(ACLEntries, 0, &hHookGetDriveTypeA));
-    hookCheck(LhSetExclusiveACL(ACLEntries, 0, &hHookGetLogicalDrives));
-    return true;
-}
+
 
 // translator
 std::vector<std::wstring> plantext; // shift_jis
@@ -511,7 +494,7 @@ BOOL WINAPI DllMain(
         debugp("Hello!\n");
 #endif        
         AddDllDirectory(L"\dll");
-        HookCrack();
+        
         if (LoadTranslatorFile()) {
             hMain = (DWORD)GetExecutableModule();
             if (hMain == 0) {
