@@ -143,6 +143,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <None Include="auto_trans.py" />
     <None Include="packages.config" />
     <None Include="pal.def" />
   </ItemGroup>
