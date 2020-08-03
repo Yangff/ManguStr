@@ -24,7 +24,7 @@ HMODULE hMods[1024] = { 0 };
 
 bool EndsWith(const std::wstring & a, const std::wstring & b) {
     if (b.size() > a.size()) return false;
-    return std::equal(a.begin() + a.size() - b.size(), a.end(), b.begin());
+    return _wcsnicmp(a.c_str() + a.size() - b.size(), b.c_str(), b.size()) == 0;
 }
 
 HMODULE GetExecutableModule() {
@@ -49,7 +49,10 @@ HMODULE GetExecutableModule() {
     return nullptr;
 }
 
+HMODULE hPalOld = nullptr;
 HMODULE GetPal_Module() {
+    if (hPalOld)
+        return hPalOld;
     HANDLE hCurProc = GetCurrentProcess();
     DWORD cbNeeded;
     if (EnumProcessModules(hCurProc, hMods, sizeof(hMods), &cbNeeded))
@@ -62,18 +65,17 @@ HMODULE GetPal_Module() {
                 std::wstring wstrModName = szModName;
                 if (EndsWith(wstrModName, L"pal_.dll")) {
                     CloseHandle(hCurProc);
-                    return hMods[i];
+                    return hPalOld = hMods[i];
                 }
             }
         }
     }
     CloseHandle(hCurProc);
-    return LoadLibrary("pal_");
+    return hPalOld = LoadLibrary("pal_");
 }
 
 // Hooker
 
-HMODULE hPalOld = nullptr;
 
 typedef int (__cdecl *fpPalFontSetType) (int);
 fpPalFontSetType oldPalFontSetType;
@@ -81,7 +83,7 @@ fpPalFontSetType oldPalFontSetType;
 extern "C" int __cdecl PalFontSetType(int x) {
 
     if (!oldPalFontSetType) {
-        hPalOld = GetPal_Module();
+        GetPal_Module();
         if (hPalOld == nullptr) {
             debugp("Still cannot find pal_.dll\n");
         }
@@ -91,12 +93,30 @@ extern "C" int __cdecl PalFontSetType(int x) {
         if (oldPalFontSetType == nullptr) {
             debugp("oldPalFontSetType == nullptr\n");
         }
+
+        debugp("All up!\n");
+
     }
 
     debugp("PalFontSetType(%d)\n",x);
     int y = oldPalFontSetType(0);
     debugp("PalFontSetType(0)=%d OK\n",y);
     return y;
+}
+
+void PalModulePatch() {
+    // pal hook
+    // Here what I patched is a call to GetACP function in pal.dll
+    // EasyHook somehow failed to hook this Win32API for no reason
+    // It should be easy to find other pal.dll in later version
+    // This hook allow Softpal to treat GBK chars as it is, 
+    // instead of using SYSTEM encoding.
+    GetPal_Module();
+    char* patchBegin = (char*)hPalOld + 0x31020;
+    const char patch[] = { 0xb8, 0xa8, 0x03,0x00,0x00,0x90 };
+    SIZE_T sz;
+    bool result = WriteProcessMemory(GetCurrentProcess(), patchBegin, patch, 5, &sz);
+    debugp("PalBase = %p, %d bytes written\n", hPalOld, sz);
 }
 
 ULONG ACLEntries[1] = { 0 };
@@ -108,7 +128,7 @@ HFONT   WINAPI hookCreateFontA(_In_ int cHeight, _In_ int cWidth, _In_ int cEsca
     if (iCharSet == 0x80 && gbSystemLoaded) {
         // Japanese Font
         debugp("CreateFont hooked\n");
-        return CreateFontW(cHeight, cWidth, cEscapement, cOrientation, cWeight, bItalic, bUnderline, bStrikeOut, 0x86, iOutPrecision, iClipPrecision, iQuality, iPitchAndFamily, L"黑体");
+        return CreateFontW(cHeight, cWidth, cEscapement, cOrientation, cWeight, bItalic, bUnderline, bStrikeOut, 0x86, iOutPrecision, iClipPrecision, iQuality, iPitchAndFamily, L"Sarasa Mono SC");
     }
     else
     {
@@ -128,12 +148,13 @@ struct LANGANDCODEPAGE {
 } *lpTranslate;
 
 
+BOOL earlyLoadPoint = false;
+
 char lpRepProductName[] = "ManguSta Discipline";
 char lpRepCompany[] = "Papapa";
 char lpRepOFN[] = "mangusta.exe";
 
 LANGANDCODEPAGE lcp = { 0x0804 , 0};
-
 HOOK_TRACE_INFO hHookVerQueryValueA = { 0 };
 BOOL
 APIENTRY
@@ -269,15 +290,14 @@ hookGetACP(void) {
     //return 936;
     return GetACP();
 }
-
-HOOK_TRACE_INFO hHookGetOEMCP = { 0 };
+*/
+HOOK_TRACE_INFO hHookGetACP = { 0 };
 UINT
 WINAPI
-hookGetOEMCP(void) {
-    debugp("GetOEMCP\n");
-    return 936;
+hookGetACP(void) {
+    return 0x3A8;
 }
-
+/*
 HOOK_TRACE_INFO hHookGetLocaleInfoW = { 0 };
 int
 WINAPI
@@ -305,22 +325,24 @@ hookGetLocaleInfoA(
 
 */
 
-HOOK_TRACE_INFO hHookMessageBoxA = { 0 };
-int
+HOOK_TRACE_INFO hHookGetCPInfo = { 0 };
+BOOL
 WINAPI
-hookMessageBoxA(
-    _In_opt_ HWND hWnd,
-    _In_opt_ LPCSTR lpText,
-    _In_opt_ LPCSTR lpCaption,
-    _In_ UINT uType) {
-
+hookGetCPInfo(
+    UINT     CodePage,
+    LPCPINFO lpCPInfo) {
+    //debugp("Hooked GetCPInfo\n");
+    return GetCPInfo(0x3A8, lpCPInfo);
 }
+
 
 
 DWORD hMain = 0;
 const unsigned int base = 0x00400000;
 const unsigned int offsetRangeCheck = 0x00425d00 - base;
 const unsigned int offsetGetChars = 0x00430f00 - base;
+
+const unsigned int offsetGetACP = 0x30fd4;
 
 HOOK_TRACE_INFO hHookRangeCheck = { 0 };
 int __cdecl hookRangeCheck(unsigned char* x) {
@@ -351,15 +373,13 @@ char* __cdecl hookGetChars(int32_t v0, int32_t v1, int32_t v2, uint32_t v3) {
         char* ch = (char*)v0 + 4;
         if (*i != 0) {
             if (TryReplace(*i, ch)) {
-                debugp("Replaced");
+                //debugp("Replaced\n");
             }
         }
         //debugp("got char %d: %s\n", *i, ch);
     }
     return addr;
 }
-
-
 
 bool PalPatch() {
     // main hook
@@ -383,12 +403,9 @@ bool PalPatch() {
     LhSetExclusiveACL(ACLEntries, 0, &hHookRangeCheck);
     LhSetExclusiveACL(ACLEntries, 0, &hHookGetChars);
 
-    // pal hook
-
     return true;
 }
 #define hookCheck(x) {NTSTATUS s = x; if (FAILED(s)) { debugp(#x" Failed\n"); return false;} }
-
 
 // translator
 std::vector<std::wstring> plantext; // shift_jis
@@ -450,12 +467,13 @@ bool LoadTranslatorFile() {
                 long nsz;
                 auto wch = get_wchar(str.c_str(), str.length(), nsz);
                 plantext.push_back(wch);
-
+                hasTrans.push_back(true);
                 if (!sub.isMember("trans")) {
-                    hasTrans.push_back(false);
-                    translate.push_back(wempty);
+                    auto tstr = sub["context"].asString();
+                    long nsz;
+                    auto wch = get_wchar(tstr.c_str(), tstr.length(), nsz);
+                    translate.push_back(wch);
                 } else {
-                    hasTrans.push_back(true);
                     auto tstr = sub["trans"].asString();
                     long nsz;
                     auto wch = get_wchar(tstr.c_str(), tstr.length(), nsz);
@@ -493,8 +511,7 @@ BOOL WINAPI DllMain(
         setvbuf(hf_out, NULL, _IONBF, 1);
         debugp("Hello!\n");
 #endif        
-        AddDllDirectory(L"\dll");
-        
+        AddDllDirectory(L"\\dll");
         if (LoadTranslatorFile()) {
             hMain = (DWORD)GetExecutableModule();
             if (hMain == 0) {
@@ -571,16 +588,30 @@ BOOL WINAPI DllMain(
                 &hHookGetLocaleInfoA
             ));
             hookCheck(LhSetExclusiveACL(ACLEntries, 0, &hHookGetLocaleInfoA));
-
-            hookCheck(LhInstallHook(
-                GetProcAddress(GetModuleHandle("Kernel32"), "GetOEMCP"),
-                hookGetOEMCP,
-                0,
-                &hHookGetOEMCP
-            ));
-            hookCheck(LhSetExclusiveACL(ACLEntries, 0, &hHookGetOEMCP));
             */
-            debugp("All up!\n");
+            //debugp("GetACP=%p\n", );
+            DWORD addrGetACP = (DWORD)GetProcAddress(GetModuleHandle("kernelbase"), "GetACP");
+            const char patch[] = { 0xb8, 0xa8, 0x03,0x00,0x00,0xc3 }; // mov eax,0x03a8; ret;
+            DWORD sz = 0;
+            WriteProcessMemory(GetCurrentProcess(), (LPVOID)addrGetACP, patch, 5, &sz);
+            /*LhInstallHook(
+                GetProcAddress(GetModuleHandle("kernelbase"), "GetACP"),
+                hookGetACP,
+                0,
+                &hHookGetACP
+            );
+            LhSetExclusiveACL(ACLEntries, 0, &hHookGetACP);*/
+            /*
+            
+            LhInstallHook(
+                GetProcAddress(GetModuleHandle("kernelbase"), "GetCPInfo"),
+                hookGetCPInfo,
+                0,
+                &hHookGetCPInfo
+            );
+            LhSetExclusiveACL(ACLEntries, 0, &hHookGetCPInfo);
+            */
+
             // All loaded
             gbSystemLoaded = true;
 
